@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <title>QR Attendance System</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f6f8fb; }
+        nav button { margin: 5px; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+        .tab { display: none; margin-top: 20px; }
+        .active { display: block; }
+        canvas { margin-top: 10px; border:1px solid #ddd; }
+        table { margin-top: 10px; border-collapse: collapse; width: 100%; background: #fff; }
+        th, td { padding: 6px 12px; border: 1px solid #ccc; text-align: left; }
+        ul { padding-left: 18px; }
+        #preview { background: #000; border: 1px solid #ccc; }
+    </style>
+</head>
+<body>
+
+<h1>QR Attendance System</h1>
+
+<nav>
+    <button data-tab="gen">Generate QR</button>
+    <button data-tab="scan">Scan QR</button>
+    <button data-tab="students">Students</button>
+    <button data-tab="attendance">Attendance</button>
+</nav>
+
+<!-- Generate QR -->
+<div id="gen" class="tab">
+    <h2>Generate QR Code</h2>
+    <label>Roll: <input id="genRoll"></label><br>
+    <label>Name: <input id="genName"></label><br>
+    <label>Class: <input id="genClass"></label><br>
+    <button id="genBtn">Generate</button>
+    <canvas id="qrCanvas" width="300" height="300"></canvas><br>
+    <a id="downloadBtn" style="display:none">Download QR</a>
+    <div id="genStatus"></div>
+</div>
+
+<!-- Scan QR -->
+<div id="scan" class="tab">
+    <h2>Scan QR Code</h2>
+    <video id="preview" width="320" height="240"></video><br>
+    <button id="startScan">Start Scan</button>
+    <button id="stopScan">Stop Scan</button>
+    <div id="scanResult"></div>
+</div>
+
+<!-- Students -->
+<div id="students" class="tab">
+    <h2>Students</h2>
+    <table>
+        <thead><tr><th>Roll</th><th>Name</th><th>Class</th></tr></thead>
+        <tbody id="stuTable"></tbody>
+    </table>
+</div>
+
+<!-- Attendance -->
+<div id="attendance" class="tab">
+    <h2>Attendance Records</h2>
+    <table>
+        <thead><tr><th>Date</th><th>Time</th><th>Roll</th></tr></thead>
+        <tbody id="attTable"></tbody>
+    </table>
+</div>
+
+<!-- Libraries -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
+
+<script>
+    const API = "http://localhost:3000/api"; // backend API URL
+
+    // ---------- Tabs ----------
+    document.querySelectorAll('nav button').forEach(btn=>{
+        btn.addEventListener('click', ()=>{
+            document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+            document.getElementById(btn.dataset.tab).classList.add('active');
+            if(btn.dataset.tab==='students') loadStudents();
+            if(btn.dataset.tab==='attendance') loadAttendance();
+        });
+    });
+    document.querySelector('nav button').click();
+
+    // ---------- Generate QR ----------
+    const genBtn=document.getElementById('genBtn');
+    const qrCanvas=document.getElementById('qrCanvas');
+    const downloadBtn=document.getElementById('downloadBtn');
+    const genStatus=document.getElementById('genStatus');
+
+    genBtn.addEventListener('click', async ()=>{
+        const roll=document.getElementById('genRoll').value.trim();
+        const name=document.getElementById('genName').value.trim() || "Unknown";
+        const cls=document.getElementById('genClass').value.trim() || "N/A";
+        if(!roll){ alert('Enter roll'); return; }
+
+        // Save student to DB
+        const res = await fetch(`${API}/students`, {
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({ roll, name, cls })
+        });
+        const data = await res.json();
+        if(data.error){
+            genStatus.innerHTML = `<small style="color:red">❌ ${data.error}</small>`;
+            return;
+        }
+
+        // Generate QR
+        const payload = `${roll}|${name}|${cls}`;
+        new QRious({ element: qrCanvas, value: payload, size: 300 });
+        const dataUrl = qrCanvas.toDataURL('image/png');
+        downloadBtn.href = dataUrl;
+        downloadBtn.download = `qr_${roll}.png`;
+        downloadBtn.style.display = 'inline-block';
+        downloadBtn.textContent = 'Download QR';
+        genStatus.innerHTML = `<small style="color:green">✔ QR generated: ${payload}</small>`;
+    });
+
+    // ---------- Scanner ----------
+    let codeReader = null;
+
+    document.getElementById('startScan').addEventListener('click', async ()=>{
+        if(!codeReader) codeReader = new ZXing.BrowserQRCodeReader();
+        const preview=document.getElementById('preview');
+        try{
+            const devices=await codeReader.listVideoInputDevices();
+            const deviceId=devices[0].deviceId;
+            await codeReader.decodeFromVideoDevice(deviceId, preview, async (result, err)=>{
+                if(result){
+                    document.getElementById('scanResult').textContent = "Scanned: " + result.text;
+                    await handleScan(result.text);
+                }
+                if(err && !(err instanceof ZXing.NotFoundException)) console.error(err);
+            });
+        }catch(e){ alert("Camera error: "+e.message); }
+    });
+
+    document.getElementById('stopScan').addEventListener('click', ()=>{
+        if(codeReader){ codeReader.reset(); }
+        document.getElementById('preview').srcObject=null;
+    });
+
+    async function handleScan(payload){
+        const [roll,name,cls] = payload.split('|');
+        if(!roll) return alert("Invalid QR");
+        const res=await fetch(`${API}/attendance`,{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({ roll })
+        });
+        const data=await res.json();
+        if(data.error){
+            alert("❌ " + data.error);
+        }else{
+            alert("✔ Attendance marked for " + roll);
+            loadAttendance();
+        }
+    }
+
+    // ---------- Students ----------
+    async function loadStudents(){
+        const res = await fetch(`${API}/students`);
+        const stu = await res.json();
+        const tbody=document.getElementById('stuTable');
+        tbody.innerHTML="";
+        stu.forEach(s=>{
+            const tr=document.createElement('tr');
+            tr.innerHTML=`<td>${s.roll}</td><td>${s.name}</td><td>${s.class}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+
+    // ---------- Attendance ----------
+    async function loadAttendance(){
+        const res = await fetch(`${API}/attendance`);
+        const recs = await res.json();
+        const tbody=document.getElementById('attTable');
+        tbody.innerHTML="";
+        recs.forEach(r=>{
+            const date=new Date(r.ts).toLocaleDateString();
+            const time=new Date(r.ts).toLocaleTimeString();
+            const tr=document.createElement('tr');
+            tr.innerHTML=`<td>${date}</td><td>${time}</td><td>${r.roll}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+</script>
+</body>
+</html>
